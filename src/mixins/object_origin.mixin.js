@@ -181,9 +181,9 @@
      */
     adjustPosition: function(to) {
       var angle = degreesToRadians(this.angle),
-          hypotFull = this.getWidth(),
-          xFull = Math.cos(angle) * hypotFull,
-          yFull = Math.sin(angle) * hypotFull,
+          hypotFull = this.getScaledWidth(),
+          xFull = fabric.util.cos(angle) * hypotFull,
+          yFull = fabric.util.sin(angle) * hypotFull,
           offsetFrom, offsetTo;
 
       //TODO: this function does not consider mixed situation like top, center.
@@ -250,13 +250,6 @@
     _getLeftTopCoords: function() {
       return this.translateToOriginPoint(this.getCenterPoint(), 'left', 'top');
     },
-
-    /**
-    * Callback; invoked right before object is about to go from active to inactive
-    */
-    onDeselect: function() {
-      /* NOOP */
-    }
   });
 
 })();

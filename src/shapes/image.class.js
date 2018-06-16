@@ -13,13 +13,6 @@
     return;
   }
 
-  var stateProperties = fabric.Object.prototype.stateProperties.concat();
-  stateProperties.push(
-    'alignX',
-    'alignY',
-    'meetOrSlice'
-  );
-
   /**
    * Image class
    * @class fabric.Image
@@ -43,33 +36,6 @@
      * @default
      */
     crossOrigin: '',
-
-    /**
-     * AlignX value, part of preserveAspectRatio (one of "none", "mid", "min", "max")
-     * @see http://www.w3.org/TR/SVG/coords.html#PreserveAspectRatioAttribute
-     * This parameter defines how the picture is aligned to its viewport when image element width differs from image width.
-     * @type String
-     * @default
-     */
-    alignX: 'none',
-
-    /**
-     * AlignY value, part of preserveAspectRatio (one of "none", "mid", "min", "max")
-     * @see http://www.w3.org/TR/SVG/coords.html#PreserveAspectRatioAttribute
-     * This parameter defines how the picture is aligned to its viewport when image element height differs from image height.
-     * @type String
-     * @default
-     */
-    alignY: 'none',
-
-    /**
-     * meetOrSlice value, part of preserveAspectRatio  (one of "meet", "slice").
-     * if meet the image is always fully visibile, if slice the viewport is always filled with image.
-     * @see http://www.w3.org/TR/SVG/coords.html#PreserveAspectRatioAttribute
-     * @type String
-     * @default
-     */
-    meetOrSlice: 'meet',
 
     /**
      * Width of a stroke.
@@ -123,7 +89,7 @@
      * as well as for history (undo/redo) purposes
      * @type Array
      */
-    stateProperties: stateProperties,
+    stateProperties: fabric.Object.prototype.stateProperties.concat('cropX', 'cropY'),
 
     /**
      * When `true`, object is cached on an additional canvas.
@@ -143,6 +109,22 @@
     cacheKey: '',
 
     /**
+     * Image crop in pixels from original image size.
+     * since 2.0.0
+     * @type Number
+     * @default
+     */
+    cropX: 0,
+
+    /**
+     * Image crop in pixels from original image size.
+     * since 2.0.0
+     * @type Number
+     * @default
+     */
+    cropY: 0,
+
+    /**
      * Constructor
      * @param {HTMLImageElement | String} element Image element
      * @param {Object} [options] Options object
@@ -152,9 +134,9 @@
     initialize: function(element, options) {
       options || (options = { });
       this.filters = [];
+      this.cacheKey = 'texture' + fabric.Object.__uid++;
       this.callSuper('initialize', options);
       this._initElement(element, options);
-      this.cacheKey = 'texture' + fabric.Object.__uid++;
     },
 
     /**
@@ -175,6 +157,11 @@
      * @chainable
      */
     setElement: function(element, options) {
+      var backend = fabric.filterBackend;
+      if (backend && backend.evictCachesForKey) {
+        backend.evictCachesForKey(this.cacheKey);
+        backend.evictCachesForKey(this.cacheKey + '_filtered');
+      }
       this._element = element;
       this._originalElement = element;
       this._initConfig(options);
@@ -185,6 +172,21 @@
         this.applyFilters();
       }
       return this;
+    },
+
+    /**
+     * Delete cacheKey if we have a webGlBackend
+     * delete reference to image elements
+     */
+    dispose: function() {
+      var backend = fabric.filterBackend;
+      if (backend && backend.evictCachesForKey) {
+        backend.evictCachesForKey(this.cacheKey);
+        backend.evictCachesForKey(this.cacheKey + '_filtered');
+      }
+      this._originalElement = undefined;
+      this._element = undefined;
+      this._filteredEl = undefined;
     },
 
     /**
@@ -267,7 +269,7 @@
       var object = extend(
         this.callSuper(
           'toObject',
-          ['crossOrigin', 'alignX', 'alignY', 'meetOrSlice'].concat(propertiesToInclude)
+          ['crossOrigin', 'cropX', 'cropY'].concat(propertiesToInclude)
         ), {
           src: this.getSrc(),
           filters: filters,
@@ -275,10 +277,15 @@
       if (this.resizeFilter) {
         object.resizeFilter = this.resizeFilter.toObject();
       }
-      object.width /= this._filterScalingX;
-      object.height /= this._filterScalingY;
-
       return object;
+    },
+
+    /**
+     * Returns true if an image has crop applied, inspecting values of cropX,cropY,width,hight.
+     * @return {Boolean}
+     */
+    hasCrop: function() {
+      return this.cropX || this.cropY || this.width < this._element.width || this.height < this._element.height;
     },
 
     /* _TO_SVG_START_ */
@@ -288,38 +295,45 @@
      * @return {String} svg representation of an instance
      */
     toSVG: function(reviver) {
-      var markup = this._createBaseSVGMarkup(), x = -this.width / 2, y = -this.height / 2,
-          preserveAspectRatio = 'none', filtered = true;
-      if (this.alignX !== 'none' && this.alignY !== 'none') {
-        preserveAspectRatio = 'x' + this.alignX + 'Y' + this.alignY + ' ' + this.meetOrSlice;
+      var markup = this._createBaseSVGMarkup(), x = -this.width / 2, y = -this.height / 2, clipPath = '';
+      if (this.hasCrop()) {
+        var clipPathId = fabric.Object.__uid++;
+        markup.push(
+          '<clipPath id="imageCrop_' + clipPathId + '">\n',
+          '\t<rect x="' + x + '" y="' + y + '" width="' + this.width + '" height="' + this.height + '" />\n',
+          '</clipPath>\n'
+        );
+        clipPath = ' clip-path="url(#imageCrop_' + clipPathId + ')" ';
       }
-      markup.push(
-        '<g transform="', this.getSvgTransform(), this.getSvgTransformMatrix(), '">\n',
-          '<image ', this.getSvgId(), 'xlink:href="', this.getSvgSrc(filtered),
-            '" x="', x, '" y="', y,
-            '" style="', this.getSvgStyles(),
-            // we're essentially moving origin of transformation from top/left corner to the center of the shape
-            // by wrapping it in container <g> element with actual transformation, then offsetting object to the top/left
-            // so that object's center aligns with container's left/top
-            '" width="', this.width,
-            '" height="', this.height,
-            '" preserveAspectRatio="', preserveAspectRatio, '"',
-          '></image>\n'
-      );
-
+      markup.push('<g transform="', this.getSvgTransform(), this.getSvgTransformMatrix(), '">\n');
+      var imageMarkup = ['\t<image ', this.getSvgId(), 'xlink:href="', this.getSvgSrc(true),
+        '" x="', x - this.cropX, '" y="', y - this.cropY,
+        '" style="', this.getSvgStyles(),
+        // we're essentially moving origin of transformation from top/left corner to the center of the shape
+        // by wrapping it in container <g> element with actual transformation, then offsetting object to the top/left
+        // so that object's center aligns with container's left/top
+        '" width="', this._element.width || this._element.naturalWidth,
+        '" height="', this._element.height || this._element.height,
+        '"', clipPath,
+        '></image>\n'];
+      if (this.paintFirst === 'fill') {
+        Array.prototype.push.apply(markup, imageMarkup);
+      }
       if (this.stroke || this.strokeDashArray) {
         var origFill = this.fill;
         this.fill = null;
         markup.push(
-          '<rect ',
-            'x="', x, '" y="', y,
-            '" width="', this.width, '" height="', this.height,
-            '" style="', this.getSvgStyles(),
+          '\t<rect ',
+          'x="', x, '" y="', y,
+          '" width="', this.width, '" height="', this.height,
+          '" style="', this.getSvgStyles(),
           '"/>\n'
         );
         this.fill = origFill;
       }
-
+      if (this.paintFirst !== 'fill') {
+        Array.prototype.push.apply(markup, imageMarkup);
+      }
       markup.push('</g>\n');
 
       return reviver ? reviver(markup.join('')) : markup.join('');
@@ -334,7 +348,10 @@
     getSrc: function(filtered) {
       var element = filtered ? this._element : this._originalElement;
       if (element) {
-        return fabric.isLikelyNode ? element._src : element.src;
+        if (element.toDataURL) {
+          return element.toDataURL();
+        }
+        return element.src;
       }
       else {
         return this.src || '';
@@ -352,6 +369,7 @@
     setSrc: function(src, callback, options) {
       fabric.util.loadImage(src, function(img) {
         this.setElement(img, options);
+        this._setWidthHeight();
         callback(this);
       }, this, options && options.crossOrigin);
       return this;
@@ -369,47 +387,33 @@
       var filter = this.resizeFilter,
           retinaScaling = this.canvas ? this.canvas.getRetinaScaling() : 1,
           minimumScale = this.minimumScaleTrigger,
-          scaleX = this.scaleX < minimumScale ? this.scaleX : 1,
-          scaleY = this.scaleY < minimumScale ? this.scaleY : 1;
-      if (scaleX * retinaScaling < 1) {
-        scaleX *= retinaScaling;
+          scaleX = this.scaleX * retinaScaling,
+          scaleY = this.scaleY * retinaScaling,
+          elementToFilter = this._filteredEl || this._originalElement;
+      if (this.group) {
+        this.set('dirty', true);
       }
-      if (scaleY * retinaScaling < 1) {
-        scaleY *= retinaScaling;
-      }
-      if (!filter || (scaleX >= 1 && scaleY >= 1)) {
-        this._element = this._filteredEl;
+      if (!filter || (scaleX > minimumScale && scaleY > minimumScale)) {
+        this._element = elementToFilter;
+        this._filterScalingX = 1;
+        this._filterScalingY = 1;
         return;
       }
       if (!fabric.filterBackend) {
         fabric.filterBackend = fabric.initFilterBackend();
       }
-      var elementToFilter = this._filteredEl || this._originalElement, imageData;
-      if (this._element === this._originalElement) {
-        // if the element is the same we need to create a new element
-        var canvasEl = fabric.util.createCanvasElement();
-        canvasEl.width = elementToFilter.width;
-        canvasEl.height = elementToFilter.height;
-        this._element = canvasEl;
-      }
-      var ctx = this._element.getContext('2d');
-      if (elementToFilter.getContext) {
-        imageData =
-          elementToFilter.getContext('2d').getImageData(0, 0, elementToFilter.width, elementToFilter.height);
-      }
-      else {
-        ctx.drawImage(elementToFilter, 0, 0);
-        imageData = ctx.getImageData(0, 0, elementToFilter.width, elementToFilter.height);
-      }
-      var options = {
-        imageData: imageData,
-        scaleX: scaleX,
-        scaleY: scaleY,
-      };
-      filter.applyTo2d(options);
-      this.width = this._element.width = options.imageData.width;
-      this.height = this._element.height = options.imageData.height;
-      ctx.putImageData(options.imageData, 0, 0);
+      var canvasEl = fabric.util.createCanvasElement(),
+          cacheKey = this._filteredEl ? this.cacheKey : (this.cacheKey + '_filtered'),
+          sourceWidth = elementToFilter.width, sourceHeight = elementToFilter.height;
+      canvasEl.width = sourceWidth;
+      canvasEl.height = sourceHeight;
+      this._element = canvasEl;
+      filter.scaleX = scaleX;
+      filter.scaleY = scaleY;
+      fabric.filterBackend.applyFilters(
+        [filter], elementToFilter, sourceWidth, sourceHeight, this._element, cacheKey);
+      this._filterScalingX = canvasEl.width / this._originalElement.width;
+      this._filterScalingY = canvasEl.height / this._originalElement.height;
     },
 
     /**
@@ -424,8 +428,12 @@
 
       filters = filters || this.filters || [];
       filters = filters.filter(function(filter) { return filter; });
+      if (this.group) {
+        this.set('dirty', true);
+      }
       if (filters.length === 0) {
         this._element = this._originalElement;
+        this._filteredEl = null;
         this._filterScalingX = 1;
         this._filterScalingY = 1;
         return this;
@@ -438,9 +446,10 @@
       if (this._element === this._originalElement) {
         // if the element is the same we need to create a new element
         var canvasEl = fabric.util.createCanvasElement();
-        canvasEl.width = imgElement.width;
-        canvasEl.height = imgElement.height;
+        canvasEl.width = sourceWidth;
+        canvasEl.height = sourceHeight;
         this._element = canvasEl;
+        this._filteredEl = canvasEl;
       }
       else {
         // clear the existing element to get new filter data
@@ -451,11 +460,10 @@
       }
       fabric.filterBackend.applyFilters(
         filters, this._originalElement, sourceWidth, sourceHeight, this._element, this.cacheKey);
-      if (this.width !== this._element.width || this.height !== this._element.height) {
-        this._filterScalingX = this._element.width / this.width;
-        this._filterScalingY = this._element.height / this.height;
-        this.width = this._element.width;
-        this.height = this._element.height;
+      if (this._originalElement.width !== this._element.width ||
+        this._originalElement.height !== this._element.height) {
+        this._filterScalingX = this._element.width / this._originalElement.width;
+        this._filterScalingY = this._element.height / this._originalElement.height;
       }
       return this;
     },
@@ -465,29 +473,24 @@
      * @param {CanvasRenderingContext2D} ctx Context to render on
      */
     _render: function(ctx) {
-      var x = -this.width / 2, y = -this.height / 2, imageMargins = this._findMargins(), elementToDraw;
-
-      if (this.meetOrSlice === 'slice') {
-        ctx.beginPath();
-        ctx.rect(x, y, this.width, this.height);
-        ctx.clip();
-      }
-
       if (this.isMoving === false && this.resizeFilter && this._needsResize()) {
         this._lastScaleX = this.scaleX;
         this._lastScaleY = this.scaleY;
         this.applyResizeFilters();
       }
-      elementToDraw = this._element;
-      elementToDraw && ctx.drawImage(elementToDraw,
-                                     x + imageMargins.marginX,
-                                     y + imageMargins.marginY,
-                                     imageMargins.width,
-                                     imageMargins.height
-                                    );
-
       this._stroke(ctx);
-      this._renderStroke(ctx);
+      this._renderPaintInOrder(ctx);
+    },
+
+    _renderFill: function(ctx) {
+      var w = this.width, h = this.height, sW = w * this._filterScalingX, sH = h * this._filterScalingY,
+          x = -w / 2, y = -h / 2, elementToDraw = this._element;
+      elementToDraw && ctx.drawImage(elementToDraw,
+        this.cropX * this._filterScalingX,
+        this.cropY * this._filterScalingY,
+        sW,
+        sH,
+        x, y, w, h);
     },
 
     /**
@@ -495,40 +498,6 @@
      */
     _needsResize: function() {
       return (this.scaleX !== this._lastScaleX || this.scaleY !== this._lastScaleY);
-    },
-
-    /**
-     * @private
-     */
-    _findMargins: function() {
-      var width = this.width, height = this.height, scales,
-          scale, marginX = 0, marginY = 0;
-
-      if (this.alignX !== 'none' || this.alignY !== 'none') {
-        scales = [this.width / this._element.width, this.height / this._element.height];
-        scale = this.meetOrSlice === 'meet'
-                ? Math.min.apply(null, scales) : Math.max.apply(null, scales);
-        width = this._element.width * scale;
-        height = this._element.height * scale;
-        if (this.alignX === 'Mid') {
-          marginX = (this.width - width) / 2;
-        }
-        if (this.alignX === 'Max') {
-          marginX = this.width - width;
-        }
-        if (this.alignY === 'Mid') {
-          marginY = (this.height - height) / 2;
-        }
-        if (this.alignY === 'Max') {
-          marginY = this.height - height;
-        }
-      }
-      return {
-        width:  width,
-        height: height,
-        marginX: marginX,
-        marginY: marginY
-      };
     },
 
     /**
@@ -587,18 +556,83 @@
      * @param {Object} [options] Object with width/height properties
      */
     _setWidthHeight: function(options) {
-      this.width = 'width' in options
+      this.width = options && ('width' in options)
         ? options.width
         : (this.getElement()
-            ? this.getElement().width || 0
-            : 0);
+          ? this.getElement().width || 0
+          : 0);
 
-      this.height = 'height' in options
+      this.height = options && ('height' in options)
         ? options.height
         : (this.getElement()
-            ? this.getElement().height || 0
-            : 0);
+          ? this.getElement().height || 0
+          : 0);
     },
+
+    /**
+     * Calculate offset for center and scale factor for the image in order to respect
+     * the preserveAspectRatio attribute
+     * @private
+     * @return {Object}
+     */
+    parsePreserveAspectRatioAttribute: function() {
+      var pAR = fabric.util.parsePreserveAspectRatioAttribute(this.preserveAspectRatio || ''),
+          rWidth = this._element.width, rHeight = this._element.height,
+          scaleX = 1, scaleY = 1, offsetLeft = 0, offsetTop = 0, cropX = 0, cropY = 0,
+          offset, pWidth = this.width, pHeight = this.height, parsedAttributes = { width: pWidth, height: pHeight };
+      if (pAR && (pAR.alignX !== 'none' || pAR.alignY !== 'none')) {
+        if (pAR.meetOrSlice === 'meet') {
+          scaleX = scaleY = fabric.util.findScaleToFit(this._element, parsedAttributes);
+          offset = (pWidth - rWidth * scaleX) / 2;
+          if (pAR.alignX === 'Min') {
+            offsetLeft = -offset;
+          }
+          if (pAR.alignX === 'Max') {
+            offsetLeft = offset;
+          }
+          offset = (pHeight - rHeight * scaleY) / 2;
+          if (pAR.alignY === 'Min') {
+            offsetTop = -offset;
+          }
+          if (pAR.alignY === 'Max') {
+            offsetTop = offset;
+          }
+        }
+        if (pAR.meetOrSlice === 'slice') {
+          scaleX = scaleY = fabric.util.findScaleToCover(this._element, parsedAttributes);
+          offset = rWidth - pWidth / scaleX;
+          if (pAR.alignX === 'Mid') {
+            cropX = offset / 2;
+          }
+          if (pAR.alignX === 'Max') {
+            cropX = offset;
+          }
+          offset = rHeight - pHeight / scaleY;
+          if (pAR.alignY === 'Mid') {
+            cropY = offset / 2;
+          }
+          if (pAR.alignY === 'Max') {
+            cropY = offset;
+          }
+          rWidth = pWidth / scaleX;
+          rHeight = pHeight / scaleY;
+        }
+      }
+      else {
+        scaleX = pWidth / rWidth;
+        scaleY = pHeight / rHeight;
+      }
+      return {
+        width: rWidth,
+        height: rHeight,
+        scaleX: scaleX,
+        scaleY: scaleY,
+        offsetLeft: offsetLeft,
+        offsetTop: offsetTop,
+        cropX: cropX,
+        cropY: cropY
+      };
+    }
   });
 
   /**
@@ -621,7 +655,8 @@
    * @param {Object} object Object to create an instance from
    * @param {Function} callback Callback to invoke when an image instance is created
    */
-  fabric.Image.fromObject = function(object, callback) {
+  fabric.Image.fromObject = function(_object, callback) {
+    var object = fabric.util.object.clone(_object);
     fabric.util.loadImage(object.src, function(img, error) {
       if (error) {
         callback && callback(null, error);
@@ -669,14 +704,7 @@
    * @return {fabric.Image} Instance of fabric.Image
    */
   fabric.Image.fromElement = function(element, callback, options) {
-    var parsedAttributes = fabric.parseAttributes(element, fabric.Image.ATTRIBUTE_NAMES),
-        preserveAR;
-
-    if (parsedAttributes.preserveAspectRatio) {
-      preserveAR = fabric.util.parsePreserveAspectRatioAttribute(parsedAttributes.preserveAspectRatio);
-      extend(parsedAttributes, preserveAR);
-    }
-
+    var parsedAttributes = fabric.parseAttributes(element, fabric.Image.ATTRIBUTE_NAMES);
     fabric.Image.fromURL(parsedAttributes['xlink:href'], callback,
       extend((options ? fabric.util.object.clone(options) : { }), parsedAttributes));
   };
